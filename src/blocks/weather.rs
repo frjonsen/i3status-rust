@@ -59,6 +59,13 @@ pub enum OpenWeatherMapUnits {
     Imperial,
 }
 
+#[derive(Clone)]
+pub struct Location {
+    latitude: f64,
+    longitude: f64,
+    name: String,
+}
+
 pub struct Weather {
     id: usize,
     weather: TextWidget,
@@ -67,6 +74,8 @@ pub struct Weather {
     service: WeatherService,
     update_interval: Duration,
     autolocate: bool,
+    // Cached location entry, will be filled later
+    location: Option<Location>,
 }
 
 fn malformed_json_error() -> Error {
@@ -146,28 +155,26 @@ fn convert_wind_direction(direction_opt: Option<f64>) -> String {
     }
 }
 
-fn configuration_error(msg: &str) -> Result<()> {
-    Err(ConfigurationError("weather".to_owned(), msg.to_owned()))
+fn configuration_error(msg: &str) -> crate::Error {
+    ConfigurationError("weather".to_owned(), msg.to_owned())
 }
 
 impl Weather {
-    fn update_weather(&mut self) -> Result<()> {
+    fn find_location(&self) -> Result<Location> {
         match &self.service {
             WeatherService::OpenWeatherMap {
                 api_key: api_key_opt,
                 city_id,
                 place,
-                units,
                 coordinates,
-                lang,
+                units: _,
+                lang: _,
             } => {
                 if api_key_opt.is_none() {
-                    return configuration_error(&format!(
+                    return Err(configuration_error(&format!(
                         "Missing member 'service.api_key'. Add the member or configure with the environment variable {}",
-                        OPENWEATHERMAP_API_KEY_ENV.to_string()));
+                        OPENWEATHERMAP_API_KEY_ENV.to_string())));
                 }
-
-                let api_key = api_key_opt.as_ref().unwrap();
 
                 let geoip_city = if self.autolocate {
                     find_ip_location().ok().unwrap_or(None) // If geo location fails, try other configuration methods
@@ -182,17 +189,107 @@ impl Weather {
                 } else if let Some(p) = place.as_ref() {
                     format!("q={}", p)
                 } else if let Some((lat, lon)) = coordinates {
+                    // Even if we already have the coordinates we must still
+                    // make the API call to get the name of the location
                     format!("lat={}&lon={}", lat, lon)
                 } else if self.autolocate {
-                    return configuration_error(
+                    return Err(configuration_error(
                         "weather is configured to use geolocation, but it could not be obtained",
-                    );
+                    ));
                 } else {
-                    return configuration_error(&format!(
+                    return Err(configuration_error(&format!(
                         "Either 'service.city_id' or 'service.place' must be provided. Add one to your config file or set with the environment variables {} or {}",
                         OPENWEATHERMAP_CITY_ID_ENV.to_string(),
-                        OPENWEATHERMAP_PLACE_ENV.to_string()));
+                        OPENWEATHERMAP_PLACE_ENV.to_string())));
                 };
+
+                let api_key = api_key_opt.as_ref().unwrap();
+
+                // This uses the "Current Weather Data" API endpoint
+                // Refer to https://openweathermap.org/current
+                let openweather_url = &format!(
+                    "https://api.openweathermap.org/data/2.5/weather?{location_query}&appid={api_key}",
+                    location_query = location_query,
+                    api_key = api_key,
+                );
+
+                let output =
+                    http::http_get_json(openweather_url, Some(Duration::from_secs(3)), vec![])?;
+
+                // All 300-399 and >500 http codes should be considered as temporary error,
+                // and not result in block error, i.e. leave the output empty.
+                if (output.code >= 300 && output.code < 400) || output.code >= 500 {
+                    return Err(BlockError(
+                        "weather".to_owned(),
+                        format!("Invalid result from curl: {}", output.code),
+                    ));
+                };
+
+                let json = output.content;
+
+                // Try to convert an API error into a block error.
+                if let Some(val) = json.get("message") {
+                    return Err(BlockError(
+                        "weather".to_string(),
+                        format!("API Error: {}", val.as_str().unwrap()),
+                    ));
+                };
+
+                let raw_lat = json
+                    .pointer("/coord/lat")
+                    .and_then(serde_json::Value::as_f64)
+                    .ok_or_else(malformed_json_error)?;
+
+                let raw_lon = json
+                    .pointer("/coord/lon")
+                    .and_then(serde_json::Value::as_f64)
+                    .ok_or_else(malformed_json_error)?;
+
+                let raw_location_name = json
+                    .pointer("/name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .ok_or_else(malformed_json_error)?;
+
+                let coordinates = Location {
+                    latitude: raw_lat,
+                    longitude: raw_lon,
+                    name: raw_location_name,
+                };
+                Ok(coordinates)
+            }
+        }
+    }
+
+    fn update_weather(&mut self) -> Result<()> {
+        match &self.service {
+            WeatherService::OpenWeatherMap {
+                api_key: api_key_opt,
+                city_id: _,
+                place: _,
+                units,
+                coordinates: _,
+                lang,
+            } => {
+                if api_key_opt.is_none() {
+                    return Err(configuration_error(&format!(
+                        "Missing member 'service.api_key'. Add the member or configure with the environment variable {}",
+                        OPENWEATHERMAP_API_KEY_ENV.to_string())));
+                }
+
+                if self.location.is_none() {
+                    self.location = Some(self.find_location()?);
+                }
+
+                let location = self
+                    .location
+                    .as_ref()
+                    .expect("Location was not cached after successful location lookup");
+
+                let api_key = api_key_opt.as_ref().unwrap();
+
+                let location_query =
+                    format!("lat={:.4}&lon={:.4}", location.latitude, location.longitude);
 
                 // This uses the "Current Weather Data" API endpoint
                 // Refer to https://openweathermap.org/current
