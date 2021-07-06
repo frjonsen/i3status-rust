@@ -400,6 +400,34 @@ impl Weather {
     }
 }
 
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ForecastWhen {
+    Today,
+    Tomorrow,
+}
+
+impl Default for ForecastWhen {
+    fn default() -> Self {
+        ForecastWhen::Today
+    }
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct ForecastConfig {
+    #[serde(default)]
+    when: ForecastWhen,
+    #[serde(default = "ForecastConfig::default_time_of_day")]
+    // API only returns forecasts at full hours, i.e 13:00, 14:00, etc
+    at: u8,
+}
+
+impl ForecastConfig {
+    fn default_time_of_day() -> u8 {
+        0
+    }
+}
+
 #[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct WeatherConfig {
@@ -413,6 +441,8 @@ pub struct WeatherConfig {
     pub service: WeatherService,
     #[serde(default)]
     pub autolocate: bool,
+    #[serde(default)]
+    pub forecast: ForecastConfig,
 }
 
 impl WeatherConfig {
@@ -430,6 +460,10 @@ impl ConfigBlock for Weather {
         shared_config: SharedConfig,
         _tx_update_request: Sender<Task>,
     ) -> Result<Self> {
+        if block_config.forecast.when != ForecastWhen::Today && block_config.forecast.at > 23 {
+            return Err(configuration_error("'at' is not a valid hour"));
+        }
+
         Ok(Weather {
             id,
             weather: TextWidget::new(id, 0, shared_config),
@@ -440,6 +474,7 @@ impl ConfigBlock for Weather {
             service: block_config.service,
             update_interval: block_config.interval,
             autolocate: block_config.autolocate,
+            location: None,
         })
     }
 }
@@ -480,5 +515,32 @@ impl Block for Weather {
 
     fn id(&self) -> usize {
         self.id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ForecastConfig;
+    use test_case::test_case;
+
+    #[test_case("\"when\" = \"today\"\n\"at\" = 0")]
+    #[test_case(r#""when" = "today""#)]
+    #[test_case("\"when\" = \"tomorrow\"\n\"at\" = 16")]
+    #[test_case("\n")] // Can't be empty
+    fn test_forecast_valid_config(config: &str) {
+        toml::from_str::<ForecastConfig>(config).expect("Valid configuration failed");
+    }
+
+    #[test_case(r#""when" = "yesterday""#)]
+    fn test_forecast_invalid_config(config: &str) {
+        toml::from_str::<ForecastConfig>(config).expect_err("Invalid configuration was allowed");
+    }
+
+    #[test]
+    fn test_forecast_default() {
+        let specified =
+            toml::from_str::<ForecastConfig>("\"when\" = \"today\"\n\"at\" = 0").unwrap();
+        let defaults = toml::from_str::<ForecastConfig>("").unwrap();
+        assert_eq!(specified, defaults)
     }
 }
