@@ -1798,6 +1798,7 @@ Show detailed weather in San Francisco through the OpenWeatherMap service:
 block = "weather"
 format = "{weather} ({location}) {temp}, {wind} m/s {direction}"
 service = { name = "openweathermap", api_key = "XXX", city_id = "5398563", units = "metric" }
+forecast = { when = "today" }
 ```
 
 #### Options
@@ -1808,6 +1809,7 @@ Key | Values | Required | Default
 `service` | The configuration of a weather service (see below). | Yes | None
 `interval` | Update interval, in seconds. | No | `600`
 `autolocate` | Gets your location using the ipapi.co IP location service (no API key required). If the API call fails then the block will fallback to `city_id` or `place`. | No | false
+`forecast` | Configuration for forecast | No | `{ "when" = "today", "at" = 0 }`
 
 #### OpenWeatherMap Options
 
@@ -1851,6 +1853,15 @@ in which case they must be provided in the environment variables
 - `weather_thunder` (when weather is reported as "Thunderstorm")
 - `weather_snow` (when weather is reported as "Snow")
 - `weather_default` (in all other cases)
+
+#### Forecast
+
+What time to fetch the weather for. If specified for today at an hour which has already passed, the current weather will be fetched instead
+
+Key | Values | Required | Default
+----|--------|----------|--------
+`when` | `"today"` or `"tomorrow"` | No | `"today"`
+`at` | An hour between 0 and 23 | No | `0`
 
 ###### [↥ back to top](#list-of-available-blocks)
 
