@@ -11,7 +11,7 @@ use crate::de::deserialize_duration;
 use crate::errors::*;
 use crate::formatting::value::Value;
 use crate::formatting::FormatTemplate;
-use crate::http;
+use crate::http::{self, HttpResponse};
 use crate::protocol::i3bar_event::{I3BarEvent, MouseButton};
 use crate::scheduler::Task;
 use crate::widgets::{text::TextWidget, I3BarWidget, State};
@@ -34,6 +34,8 @@ pub enum WeatherService {
         units: OpenWeatherMapUnits,
         #[serde(default = "WeatherService::default_lang")]
         lang: Option<String>,
+        #[serde(default = "WeatherService::default_api_url")]
+        api_url: String,
     },
 }
 
@@ -49,6 +51,9 @@ impl WeatherService {
     }
     fn default_lang() -> Option<String> {
         Some("en".to_string())
+    }
+    fn default_api_url() -> String {
+        "https://api.openweathermap.org/data/2.5".to_string()
     }
 }
 
@@ -169,6 +174,7 @@ impl Weather {
                 coordinates,
                 units: _,
                 lang: _,
+                api_url,
             } => {
                 if api_key_opt.is_none() {
                     return Err(configuration_error(&format!(
@@ -208,7 +214,8 @@ impl Weather {
                 // This uses the "Current Weather Data" API endpoint
                 // Refer to https://openweathermap.org/current
                 let openweather_url = &format!(
-                    "https://api.openweathermap.org/data/2.5/weather?{location_query}&appid={api_key}",
+                    "{api_url}/weather?{location_query}&appid={api_key}",
+                    api_url = api_url,
                     location_query = location_query,
                     api_key = api_key,
                 );
@@ -270,6 +277,7 @@ impl Weather {
                 units,
                 coordinates: _,
                 lang,
+                api_url,
             } => {
                 if api_key_opt.is_none() {
                     return Err(configuration_error(&format!(
@@ -294,7 +302,8 @@ impl Weather {
                 // This uses the "Current Weather Data" API endpoint
                 // Refer to https://openweathermap.org/current
                 let openweather_url = &format!(
-                    "https://api.openweathermap.org/data/2.5/weather?{location_query}&appid={api_key}&units={units}&lang={lang}",
+                    "{api_url}/weather?{location_query}&appid={api_key}&units={units}&lang={lang}",
+                    api_url = api_url,
                     location_query = location_query,
                     api_key = api_key,
                     units = match *units {
@@ -460,7 +469,8 @@ impl ConfigBlock for Weather {
         shared_config: SharedConfig,
         _tx_update_request: Sender<Task>,
     ) -> Result<Self> {
-        if block_config.forecast.when != ForecastWhen::Today && block_config.forecast.at > 23 {
+        // No need to check for negatives since it's unsigned
+        if block_config.forecast.at > 23 {
             return Err(configuration_error("'at' is not a valid hour"));
         }
 
@@ -520,8 +530,40 @@ impl Block for Weather {
 
 #[cfg(test)]
 mod tests {
-    use super::ForecastConfig;
+    use super::{ForecastConfig, Weather, WeatherConfig};
+    use crate::config::SharedConfig;
+    use crate::widgets::text::TextWidget;
+    use httpmock::MockServer;
+    use std::collections::HashMap;
     use test_case::test_case;
+
+    fn get_weather_block(api_url: String, config: &[&str]) -> Weather {
+        let mut options = config.join(", ");
+
+        if !config.is_empty() {
+            options = format!(", {}", options);
+        }
+
+        let block_config = toml::from_str::<WeatherConfig>(
+            &format!(r#"
+                "service" = {{"name" = "openweathermap", "units" = "metric", "api_key" = "mock_api_key", "api_url" = "{}"{}}}
+            "#, api_url, options),
+        )
+        .unwrap();
+        Weather {
+            id: 0,
+            weather: TextWidget::new(0, 0, SharedConfig::default()),
+            weather_keys: HashMap::new(),
+            service: block_config.service,
+            update_interval: block_config.interval,
+            autolocate: block_config.autolocate,
+            location: None,
+            format: block_config
+                .format
+                .with_default("{weather} {temp}\u{00b0}")
+                .unwrap(),
+        }
+    }
 
     #[test_case("\"when\" = \"today\"\n\"at\" = 0")]
     #[test_case(r#""when" = "today""#)]
@@ -542,5 +584,31 @@ mod tests {
             toml::from_str::<ForecastConfig>("\"when\" = \"today\"\n\"at\" = 0").unwrap();
         let defaults = toml::from_str::<ForecastConfig>("").unwrap();
         assert_eq!(specified, defaults)
+    }
+
+    #[test_case(&[r#""city_id" = "12345""#])]
+    #[test_case(&[r#""place" = "London""#])]
+    #[test_case(&[r#""coordinates" = ["18.4856", "4.3256"]"#])]
+    fn test_get_location_by_query(config: &[&str]) {
+        let server = MockServer::start();
+
+        let weather_mock = server.mock(|when, then| {
+            when.path_contains("/weather");
+            then.status(200)
+                // A real response contains a lot more, but this is the only part
+                // relevant to the test
+                .body(r#"{ "coord": { "lat": 18.4856, "lon": 4.3256 }, "name": "London" }"#);
+        });
+
+        let weather = get_weather_block(format!("http://127.0.0.1:{}", server.port()), config);
+        let location = weather.find_location().unwrap();
+
+        weather_mock.assert();
+        assert!((location.latitude - 18.4856).abs() < f64::EPSILON);
+        assert!((location.longitude - 4.3256).abs() < f64::EPSILON);
+        assert_eq!(location.name, "London");
+    }
+
+    #[test]
     }
 }
