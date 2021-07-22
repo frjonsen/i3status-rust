@@ -63,4 +63,5 @@ features = ["std"]
 
 [dev-dependencies]
 assert_fs = "1.0"
+httpmock = "0.5.8"
 test-case = "1.1.0"
