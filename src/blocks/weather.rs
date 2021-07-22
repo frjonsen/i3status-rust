@@ -222,17 +222,7 @@ impl Weather {
 
                 let output =
                     http::http_get_json(openweather_url, Some(Duration::from_secs(3)), vec![])?;
-
-                // All 300-399 and >500 http codes should be considered as temporary error,
-                // and not result in block error, i.e. leave the output empty.
-                if (output.code >= 300 && output.code < 400) || output.code >= 500 {
-                    return Err(BlockError(
-                        "weather".to_owned(),
-                        format!("Invalid result from curl: {}", output.code),
-                    ));
-                };
-
-                let json = output.content;
+                let json = Weather::get_curl_output(output)?;
 
                 // Try to convert an API error into a block error.
                 if let Some(val) = json.get("message") {
@@ -266,6 +256,19 @@ impl Weather {
                 Ok(coordinates)
             }
         }
+    }
+
+    fn get_curl_output(response: HttpResponse<serde_json::Value>) -> Result<serde_json::Value> {
+        // All 300-399 and >500 http codes should be considered as temporary error,
+        // and not result in block error, i.e. leave the output empty.
+        if (response.code >= 300 && response.code < 400) || response.code >= 500 {
+            return Err(BlockError(
+                "weather".to_owned(),
+                format!("Invalid result from curl: {}", response.code),
+            ));
+        };
+
+        Ok(response.content)
     }
 
     fn update_weather(&mut self) -> Result<()> {
@@ -316,16 +319,7 @@ impl Weather {
                 let output =
                     http::http_get_json(openweather_url, Some(Duration::from_secs(3)), vec![])?;
 
-                // All 300-399 and >500 http codes should be considered as temporary error,
-                // and not result in block error, i.e. leave the output empty.
-                if (output.code >= 300 && output.code < 400) || output.code >= 500 {
-                    return Err(BlockError(
-                        "weather".to_owned(),
-                        format!("Invalid result from curl: {}", output.code),
-                    ));
-                };
-
-                let json = output.content;
+                let json = Weather::get_curl_output(output)?;
 
                 // Try to convert an API error into a block error.
                 if let Some(val) = json.get("message") {
