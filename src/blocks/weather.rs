@@ -271,6 +271,82 @@ impl Weather {
         Ok(response.content)
     }
 
+    fn parse_openweathermap_weather_update(
+        &self,
+        json: serde_json::Value,
+        units: &OpenWeatherMapUnits,
+    ) -> Result<(&'static str, HashMap<&'static str, Value>)> {
+        let raw_weather = json
+            .pointer("/weather/0/main")
+            .and_then(|v| v.as_str())
+            .ok_or_else(malformed_json_error)?
+            .to_string();
+
+        let raw_weather_verbose = json
+            .pointer("/weather/0/description")
+            .and_then(|v| v.as_str())
+            .ok_or_else(malformed_json_error)?
+            .to_string();
+
+        let raw_temp = json
+            .pointer("/main/temp")
+            .and_then(|v| v.as_f64())
+            .ok_or_else(malformed_json_error)?;
+
+        let raw_humidity = json
+            .pointer("/main/humidity")
+            .map_or(Some(0.0), |v| v.as_f64()) // provide default value 0.0
+            .ok_or_else(malformed_json_error)?;
+
+        let raw_wind_speed: f64 = json
+            .pointer("/wind/speed")
+            .map_or(Some(0.0), |v| v.as_f64()) // provide default value 0.0
+            .ok_or_else(malformed_json_error)?; // error when conversion to f64 fails
+
+        let raw_wind_direction: Option<f64> = json
+            .pointer("/wind/deg")
+            .map_or(Some(None), |v| v.as_f64().map(Some)) // provide default value None
+            .ok_or_else(malformed_json_error)?; // error when conversion to f64 fails
+
+        let raw_location = json
+            .pointer("/name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(malformed_json_error)?;
+
+        let icon = match raw_weather.as_str() {
+            "Clear" => "weather_sun",
+            "Rain" | "Drizzle" => "weather_rain",
+            "Clouds" | "Fog" | "Mist" => "weather_clouds",
+            "Thunderstorm" => "weather_thunder",
+            "Snow" => "weather_snow",
+            _ => "weather_default",
+        };
+
+        let kmh_wind_speed = if *units == OpenWeatherMapUnits::Metric {
+            raw_wind_speed * 3600.0 / 1000.0
+        } else {
+            // convert mph to m/s, then km/h
+            (raw_wind_speed * 0.447) * 3600.0 / 1000.0
+        };
+
+        let apparent_temp =
+            australian_apparent_temp(raw_temp, raw_humidity, raw_wind_speed, *units);
+
+        let weather_keys = map!(
+            "weather" => Value::from_string(raw_weather),
+            "weather_verbose" => Value::from_string(raw_weather_verbose),
+            "temp" => Value::from_integer(raw_temp as i64).degrees(),
+            "humidity" => Value::from_integer(raw_humidity as i64),
+            "apparent" => Value::from_integer(apparent_temp as i64).degrees(),
+            "wind" => Value::from_float(raw_wind_speed),
+            "wind_kmh" => Value::from_float(kmh_wind_speed),
+            "direction" => Value::from_string(convert_wind_direction(raw_wind_direction)),
+            "location" => Value::from_string(raw_location),
+        );
+        Ok((icon, weather_keys))
+    }
+
     fn update_weather(&mut self) -> Result<()> {
         match &self.service {
             WeatherService::OpenWeatherMap {
@@ -329,74 +405,9 @@ impl Weather {
                     ));
                 };
 
-                let raw_weather = json
-                    .pointer("/weather/0/main")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(malformed_json_error)?
-                    .to_string();
-
-                let raw_weather_verbose = json
-                    .pointer("/weather/0/description")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(malformed_json_error)?
-                    .to_string();
-
-                let raw_temp = json
-                    .pointer("/main/temp")
-                    .and_then(|v| v.as_f64())
-                    .ok_or_else(malformed_json_error)?;
-
-                let raw_humidity = json
-                    .pointer("/main/humidity")
-                    .map_or(Some(0.0), |v| v.as_f64()) // provide default value 0.0
-                    .ok_or_else(malformed_json_error)?;
-
-                let raw_wind_speed: f64 = json
-                    .pointer("/wind/speed")
-                    .map_or(Some(0.0), |v| v.as_f64()) // provide default value 0.0
-                    .ok_or_else(malformed_json_error)?; // error when conversion to f64 fails
-
-                let raw_wind_direction: Option<f64> = json
-                    .pointer("/wind/deg")
-                    .map_or(Some(None), |v| v.as_f64().map(Some)) // provide default value None
-                    .ok_or_else(malformed_json_error)?; // error when conversion to f64 fails
-
-                let raw_location = json
-                    .pointer("/name")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .ok_or_else(malformed_json_error)?;
-
-                self.weather.set_icon(match raw_weather.as_str() {
-                    "Clear" => "weather_sun",
-                    "Rain" | "Drizzle" => "weather_rain",
-                    "Clouds" | "Fog" | "Mist" => "weather_clouds",
-                    "Thunderstorm" => "weather_thunder",
-                    "Snow" => "weather_snow",
-                    _ => "weather_default",
-                })?;
-
-                let kmh_wind_speed = if *units == OpenWeatherMapUnits::Metric {
-                    raw_wind_speed * 3600.0 / 1000.0
-                } else {
-                    // convert mph to m/s, then km/h
-                    (raw_wind_speed * 0.447) * 3600.0 / 1000.0
-                };
-
-                let apparent_temp =
-                    australian_apparent_temp(raw_temp, raw_humidity, raw_wind_speed, *units);
-
-                self.weather_keys = map!(
-                    "weather" => Value::from_string(raw_weather),
-                    "weather_verbose" => Value::from_string(raw_weather_verbose),
-                    "temp" => Value::from_integer(raw_temp as i64).degrees(),
-                    "humidity" => Value::from_integer(raw_humidity as i64),
-                    "apparent" => Value::from_integer(apparent_temp as i64).degrees(),
-                    "wind" => Value::from_float(raw_wind_speed),
-                    "wind_kmh" => Value::from_float(kmh_wind_speed),
-                    "direction" => Value::from_string(convert_wind_direction(raw_wind_direction)),
-                    "location" => Value::from_string(raw_location),
-                );
+                let results = self.parse_openweathermap_weather_update(json, units)?;
+                self.weather.set_icon(results.0)?;
+                self.weather_keys = results.1;
                 Ok(())
             }
         }
@@ -601,8 +612,5 @@ mod tests {
         assert!((location.latitude - 18.4856).abs() < f64::EPSILON);
         assert!((location.longitude - 4.3256).abs() < f64::EPSILON);
         assert_eq!(location.name, "London");
-    }
-
-    #[test]
     }
 }
