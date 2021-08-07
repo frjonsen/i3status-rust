@@ -528,14 +528,19 @@ impl Block for Weather {
 
 #[cfg(test)]
 mod tests {
-    use super::{ForecastConfig, Weather, WeatherConfig};
+    use super::{ForecastConfig, Location, Weather, WeatherConfig};
     use crate::config::SharedConfig;
+    use crate::formatting::value::Value;
     use crate::widgets::text::TextWidget;
     use httpmock::MockServer;
+    use rand::seq::SliceRandom;
+    use rand::Rng;
+    use serde::Serialize;
+    use serde_json::json;
     use std::collections::HashMap;
     use test_case::test_case;
 
-    fn get_weather_block(api_url: String, config: &[&str]) -> Weather {
+    fn get_weather_block(api_url: String, config: &[&str], location: Option<Location>) -> Weather {
         let mut options = config.join(", ");
 
         if !config.is_empty() {
@@ -555,7 +560,7 @@ mod tests {
             service: block_config.service,
             update_interval: block_config.interval,
             autolocate: block_config.autolocate,
-            location: None,
+            location,
             format: block_config
                 .format
                 .with_default("{weather} {temp}\u{00b0}")
@@ -598,12 +603,113 @@ mod tests {
                 .body(r#"{ "coord": { "lat": 18.4856, "lon": 4.3256 }, "name": "London" }"#);
         });
 
-        let weather = get_weather_block(format!("http://127.0.0.1:{}", server.port()), config);
+        let weather =
+            get_weather_block(format!("http://127.0.0.1:{}", server.port()), config, None);
         let location = weather.find_location().unwrap();
 
         weather_mock.assert();
         assert!((location.latitude - 18.4856).abs() < f64::EPSILON);
         assert!((location.longitude - 4.3256).abs() < f64::EPSILON);
         assert_eq!(location.name, "London");
+    }
+
+    #[derive(Serialize)]
+    struct ResponseWeather {
+        id: u16,
+        main: String,
+        description: String,
+    }
+
+    #[derive(Serialize)]
+    struct ResponseDetails {
+        dt: u64,
+        temp: i32,
+        humidity: u8,
+        wind_speed: u8,
+        wind_deg: u16,
+        weather: Vec<ResponseWeather>,
+    }
+
+    #[derive(Serialize)]
+    struct OnecallResponse {
+        timezone_offset: i32,
+        current: ResponseDetails,
+        hourly: Vec<ResponseDetails>,
+    }
+
+    fn generate_weather(time: u64) -> ResponseDetails {
+        let thunderstorm = (200, "Thunderstorm", "thunderstorm with light rain");
+        let drizzle = (300, "Drizzle", "light intensity drizzle");
+        let clear = (800, "Clear", "cleary sky");
+        let snow = (601, "Snow", "light snow");
+        let conditions = vec![thunderstorm, drizzle, clear, snow];
+
+        let mut rng = rand::thread_rng();
+        // Not terribly important what the values are, just want them to be
+        // reasonably different for each timestamp to make assertions easier
+        ResponseDetails {
+            dt: time,
+            temp: rng.gen_range(-50..50),
+            humidity: rng.gen_range(0..110),
+            wind_speed: rng.gen_range(0..6),
+            wind_deg: rng.gen_range(0..359),
+            // Too annoying to randomize this
+            weather: conditions
+                .choose(&mut rng)
+                .map(|c| ResponseWeather {
+                    id: c.0,
+                    main: c.1.to_string(),
+                    description: c.2.to_string(),
+                })
+                .map(|c| vec![c])
+                .unwrap(),
+        }
+    }
+
+    fn generate_onecall_result(start_hour: u64) -> OnecallResponse {
+        let current = generate_weather(start_hour - 123);
+        let hourly = (0..48)
+            .map(|h| generate_weather(start_hour + 3600 * h))
+            .collect::<Vec<_>>();
+        OnecallResponse {
+            timezone_offset: -21600,
+            current,
+            hourly,
+        }
+    }
+
+    #[test]
+    fn test_update_weather() {
+        let server = MockServer::start();
+        let location = Location {
+            latitude: 5.235,
+            longitude: 5.235,
+            name: "London".to_string(),
+        };
+
+        let result = generate_onecall_result(1618318800);
+        let weather_mock = server.mock(|when, then| {
+            when.path_contains("/onecall");
+            then.status(200)
+                // A real response contains a lot more, but this is the only part
+                // relevant to the test
+                .body(json!(result).to_string());
+        });
+
+        let mut weather_block = get_weather_block(
+            format!("http://127.0.0.1:{}", server.port()),
+            &[],
+            Some(location),
+        );
+        weather_block.update_weather().unwrap();
+        assert_eq!(
+            weather_block.weather_keys["temp"].format().unwrap(),
+            Value::from_integer(result.current.temp as i64)
+                .degrees()
+                .format()
+                .unwrap()
+        );
+
+        weather_mock.assert()
     }
 }
