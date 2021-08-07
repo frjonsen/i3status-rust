@@ -277,42 +277,36 @@ impl Weather {
         units: &OpenWeatherMapUnits,
     ) -> Result<(&'static str, HashMap<&'static str, Value>)> {
         let raw_weather = json
-            .pointer("/weather/0/main")
+            .pointer("/current/weather/0/main")
             .and_then(|v| v.as_str())
             .ok_or_else(malformed_json_error)?
             .to_string();
 
         let raw_weather_verbose = json
-            .pointer("/weather/0/description")
+            .pointer("/current/weather/0/description")
             .and_then(|v| v.as_str())
             .ok_or_else(malformed_json_error)?
             .to_string();
 
         let raw_temp = json
-            .pointer("/main/temp")
+            .pointer("/current/temp")
             .and_then(|v| v.as_f64())
             .ok_or_else(malformed_json_error)?;
 
         let raw_humidity = json
-            .pointer("/main/humidity")
+            .pointer("/current/humidity")
             .map_or(Some(0.0), |v| v.as_f64()) // provide default value 0.0
             .ok_or_else(malformed_json_error)?;
 
         let raw_wind_speed: f64 = json
-            .pointer("/wind/speed")
+            .pointer("/current/wind_speed")
             .map_or(Some(0.0), |v| v.as_f64()) // provide default value 0.0
             .ok_or_else(malformed_json_error)?; // error when conversion to f64 fails
 
         let raw_wind_direction: Option<f64> = json
-            .pointer("/wind/deg")
+            .pointer("/current/wind_deg")
             .map_or(Some(None), |v| v.as_f64().map(Some)) // provide default value None
             .ok_or_else(malformed_json_error)?; // error when conversion to f64 fails
-
-        let raw_location = json
-            .pointer("/name")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(malformed_json_error)?;
 
         let icon = match raw_weather.as_str() {
             "Clear" => "weather_sun",
@@ -332,7 +326,6 @@ impl Weather {
 
         let apparent_temp =
             australian_apparent_temp(raw_temp, raw_humidity, raw_wind_speed, *units);
-
         let weather_keys = map!(
             "weather" => Value::from_string(raw_weather),
             "weather_verbose" => Value::from_string(raw_weather_verbose),
@@ -342,7 +335,7 @@ impl Weather {
             "wind" => Value::from_float(raw_wind_speed),
             "wind_kmh" => Value::from_float(kmh_wind_speed),
             "direction" => Value::from_string(convert_wind_direction(raw_wind_direction)),
-            "location" => Value::from_string(raw_location),
+            "location" => Value::from_string(self.location.as_ref().expect("Location was not set").name.clone()),
         );
         Ok((icon, weather_keys))
     }
@@ -381,7 +374,7 @@ impl Weather {
                 // This uses the "Current Weather Data" API endpoint
                 // Refer to https://openweathermap.org/current
                 let openweather_url = &format!(
-                    "{api_url}/weather?{location_query}&appid={api_key}&units={units}&lang={lang}",
+                    "{api_url}/onecall?{location_query}&appid={api_key}&units={units}&lang={lang}&exclude=daily,minutely,alerts",
                     api_url = api_url,
                     location_query = location_query,
                     api_key = api_key,
